@@ -24,6 +24,12 @@ export function mockFetch(routes: Record<string, unknown | Handler>) {
   return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init = {}) => {
     const url = String(input)
     const key = `${init.method ?? 'GET'} ${url.split('?')[0]}`
+    if (key === 'GET /api/me' && !(key in routes)) {
+      return new Response(JSON.stringify({ user: null, role: 'publisher', auth_enabled: false }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
     if (!(key in routes)) throw new Error(`Unexpected request: ${key}`)
     const route = routes[key]
     const body = typeof route === 'function' ? (route as Handler)(url, init) : route

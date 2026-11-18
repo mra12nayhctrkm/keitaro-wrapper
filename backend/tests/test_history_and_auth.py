@@ -200,3 +200,112 @@ async def test_the_app_uses_its_own_settings(
         )
     assert response.status_code == 201
     assert response.json()["name"] == "test_custom_x"
+
+
+# ---- roles and SSO ----------------------------------------------------------
+
+
+async def make_client(settings: Settings, keitaro: FakeKeitaro, **overrides: Any) -> Any:
+    app = create_app(settings.model_copy(update=overrides), keitaro=keitaro, frontend_dist=None)
+    manager = LifespanManager(app)
+    await manager.__aenter__()
+    http = AsyncClient(transport=ASGITransport(app=manager.app), base_url="http://test")
+    return manager, http
+
+
+@pytest.mark.usefixtures("migrated_db", "campaign")
+async def test_editor_drafts_but_cannot_publish(settings: Settings, keitaro: FakeKeitaro) -> None:
+    manager, http = await make_client(
+        settings, keitaro, app_users="ed:pw1:editor,pub:pw2:publisher"
+    )
+    try:
+        ed, pub = basic("ed", "pw1"), basic("pub", "pw2")
+        assert (await call(http, "GET", "/api/me", headers=ed))["role"] == "editor"
+        await call(http, "POST", f"/api/campaigns/{CAMPAIGN}/fetch", headers=ed)
+        await call(http, "POST", f"/api/streams/{STREAM}/offers", json={"offer_id": 13}, headers=ed)
+
+        response = await http.post(f"/api/streams/{STREAM}/push", headers=ed)
+        assert response.status_code == 403
+        assert "publishers" in response.json()["detail"]
+        response = await http.post(
+            "/api/campaigns", headers=ed, json={"name": "x", "geo": "AU", "offer_id": 11}
+        )
+        assert response.status_code == 403
+        assert keitaro.stream_offers(STREAM) == {11: 50, 12: 50}
+
+        await call(http, "POST", f"/api/streams/{STREAM}/push", headers=pub)
+        (entry,) = await call(http, "GET", f"/api/streams/{STREAM}/history", headers=pub)
+        assert entry["actor"] == "pub"
+        assert (await http.get("/api/me", headers=basic("pub", "pw1"))).status_code == 401
+    finally:
+        await http.aclose()
+        await manager.__aexit__(None, None, None)
+
+
+@pytest.mark.usefixtures("migrated_db")
+async def test_sso_via_trusted_proxy_header(settings: Settings, keitaro: FakeKeitaro) -> None:
+    manager, http = await make_client(
+        settings,
+        keitaro,
+        trusted_user_header="X-Forwarded-Email",
+        sso_publishers="Lead@Example.com",
+    )
+    try:
+        assert (await http.get("/api/me")).status_code == 401  # no proxy header, no basic
+        me = await call(http, "GET", "/api/me", headers={"X-Forwarded-Email": "dev@example.com"})
+        assert me == {"user": "dev@example.com", "role": "editor", "auth_enabled": True}
+        me = await call(http, "GET", "/api/me", headers={"X-Forwarded-Email": "lead@example.com"})
+        assert me["role"] == "publisher"
+    finally:
+        await http.aclose()
+        await manager.__aexit__(None, None, None)
+
+
+async def test_open_mode_everyone_publishes(client: AsyncClient) -> None:
+    assert await call(client, "GET", "/api/me") == {
+        "user": None,
+        "role": "publisher",
+        "auth_enabled": False,
+    }
+
+
+@pytest.mark.parametrize("users", ["nopassword", "a:b:admin", ":pw:editor", "a::editor"])
+def test_bad_users_config_fails_fast(settings: Settings, users: str) -> None:
+    with pytest.raises(ValueError, match="name:password:role"):
+        create_app(settings.model_copy(update={"app_users": users}), frontend_dist=None)
+
+
+def test_password_may_contain_colons(settings: Settings) -> None:
+    from app.auth import Role, parse_users
+
+    users = parse_users(settings.model_copy(update={"app_users": "al:pa:ss:publisher"}))
+    assert users["al"].password == b"pa:ss"
+    assert users["al"].role is Role.PUBLISHER
+
+
+@pytest.mark.usefixtures("migrated_db")
+async def test_editors_may_bulk_draft_but_not_bulk_publish(
+    settings: Settings, keitaro: FakeKeitaro
+) -> None:
+    keitaro.add_campaign(5, "bulk", group_id=3)
+    keitaro.add_stream(5, stream_id=50, offers={11: 100})
+    manager, http = await make_client(settings, keitaro, app_users="ed:pw:editor")
+    try:
+        body = {
+            "from_offer_id": 11,
+            "to_offer_id": 12,
+            "targets": [{"campaign_id": 5, "stream_id": 50}],
+        }
+        response = await http.post(
+            "/api/bulk/replace-offer/apply",
+            headers=basic("ed", "pw"),
+            json={**body, "publish": True},
+        )
+        assert response.status_code == 403
+        drafted = await call(
+            http, "POST", "/api/bulk/replace-offer/apply", headers=basic("ed", "pw"), json=body
+        )
+        assert drafted[0]["status"] == "drafted"
+    finally:
+        await http.aclose()
+        await manager.__aexit__(None, None, None)

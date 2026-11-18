@@ -1,6 +1,8 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { api, type Campaign, type Named, type Stream, type StreamOffer } from '../api'
+import { api, type Campaign, type Named, type OfferStats, type Stream, type StreamOffer, type StreamStats } from '../api'
+import { Sparkline } from './Sparkline'
+import { useMe } from '../useMe'
 import { HistoryPanel } from './HistoryPanel'
 import { OfferSearch } from './OfferSearch'
 
@@ -13,9 +15,13 @@ const STATUS_LABEL: Record<StreamOffer['status'], string> = {
 
 interface Props {
   stream: Stream
+  /** Keitaro stats for the selected period, if loaded. */
+  stats?: StreamStats
 }
 
-export function StreamCard({ stream }: Props) {
+export function StreamCard({ stream, stats }: Props) {
+  const { canPublish } = useMe()
+  const offerStats = new Map(stats?.offers.map((o) => [o.offer_id, o]))
   const queryClient = useQueryClient()
   const [offer, setOffer] = useState<Named | null>(null)
   const [showHistory, setShowHistory] = useState(false)
@@ -44,7 +50,9 @@ export function StreamCard({ stream }: Props) {
           <h3>
             {stream.name} <span className="muted">#{stream.id}</span>
           </h3>
-          <span className="muted">no offers</span>
+          <span className="muted">
+            no offers{stats ? ` · ${stats.clicks} clicks` : ''}
+          </span>
         </header>
       </section>
     )
@@ -63,7 +71,18 @@ export function StreamCard({ stream }: Props) {
         <div className="actions">
           {stream.is_dirty && (
             <>
-              <button className="primary" disabled={busy} onClick={() => run(() => api.push(stream.id))}>
+              <button
+                className="primary"
+                disabled={busy || !canPublish || stream.remote_changed_at !== null}
+                title={
+                  !canPublish
+                    ? 'Only publishers can push to Keitaro'
+                    : stream.remote_changed_at
+                      ? 'Keitaro changed under your draft: review it first'
+                      : undefined
+                }
+                onClick={() => run(() => api.push(stream.id))}
+              >
                 Push to Keitaro
               </button>
               <button disabled={busy} onClick={() => run(() => api.cancel(stream.id))}>
@@ -76,6 +95,19 @@ export function StreamCard({ stream }: Props) {
           </button>
         </div>
       </header>
+
+      {stream.remote_changed_at && (
+        <div className="conflict" role="alert">
+          <b>Keitaro changed while you were editing</b> (
+          {new Date(stream.remote_changed_at).toLocaleString()}). Your draft was made on an older
+          version: check the shares below, then confirm or cancel the draft.
+          <div className="actions">
+            <button disabled={busy} onClick={() => run(() => api.acknowledge(stream.id))}>
+              Draft is still right
+            </button>
+          </div>
+        </div>
+      )}
 
       {showHistory && <HistoryPanel streamId={stream.id} busy={busy} run={run} />}
 
@@ -93,16 +125,18 @@ export function StreamCard({ stream }: Props) {
           <tr>
             <th>Offer</th>
             <th className="num">Share</th>
+            <th>Stats</th>
+            <th>Trends</th>
             <th />
           </tr>
         </thead>
         <tbody>
           {stream.offers.map((o) => (
-            <OfferRow key={o.id} offer={o} busy={busy} run={run} />
+            <OfferRow key={o.id} offer={o} stats={offerStats.get(o.offer_id)} busy={busy} run={run} />
           ))}
           {stream.offers.length === 0 && (
             <tr>
-              <td colSpan={3} className="muted">
+              <td colSpan={5} className="muted">
                 No offers yet
               </td>
             </tr>
@@ -130,11 +164,12 @@ export function StreamCard({ stream }: Props) {
 
 interface RowProps {
   offer: StreamOffer
+  stats?: OfferStats
   busy: boolean
   run: (action: () => Promise<Stream>) => void
 }
 
-function OfferRow({ offer: o, busy, run }: RowProps) {
+function OfferRow({ offer: o, stats, busy, run }: RowProps) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(String(o.share))
   const removed = o.status === 'removed' || o.status === 'pending_remove'
@@ -193,6 +228,20 @@ function OfferRow({ offer: o, busy, run }: RowProps) {
           📌
         </button>
       </td>
+      <td className="stats">
+        {stats ? (
+          <>
+            <b>{stats.clicks}</b> clicks · <b>{stats.conversions}</b> conv
+            <br />
+            <span className="muted">
+              CR {stats.cr}% · EPC {stats.epc.toFixed(2)} · rev {stats.revenue.toFixed(2)}
+            </span>
+          </>
+        ) : (
+          <span className="muted">no clicks</span>
+        )}
+      </td>
+      <td>{stats && <Sparkline values={stats.daily_clicks} label={`Daily clicks for offer ${o.offer_id}`} />}</td>
       <td className="actions">
         {removed ? (
           <button disabled={busy} onClick={() => run(() => api.bringBack(o.id))}>

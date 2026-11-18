@@ -3,6 +3,9 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import type { Campaign, Stream } from '../api'
 import { mockFetch, renderWithProviders } from '../test/utils'
+
+/** Calls the component made, without the shared GET /api/me. */
+const calls = (m: ReturnType<typeof mockFetch>) => m.mock.calls.filter((c) => String(c[0]) !== '/api/me')
 import { StreamCard } from './StreamCard'
 
 const stream: Stream = {
@@ -13,6 +16,7 @@ const stream: Stream = {
   position: 2,
   has_offers: true,
   is_dirty: false,
+  remote_changed_at: null,
   total_share: 100,
   offers: [
     { id: 10, offer_id: 11, offer_name: 'Miaflow', share: 50, pinned: false, status: 'active', published_share: 50 },
@@ -54,7 +58,7 @@ describe('StreamCard', () => {
     await waitFor(() =>
       expect(client.getQueryData<Campaign>(['campaign', 1])?.streams[0].is_dirty).toBe(true),
     )
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(calls(fetchMock)).toHaveLength(1)
   })
 
   it('a dirty stream offers Push and Cancel, removed offers offer Bring back', async () => {
@@ -77,8 +81,8 @@ describe('StreamCard', () => {
     expect(screen.getByText('will be removed')).toBeInTheDocument()
     await userEvent.click(screen.getByText('Bring back'))
     await userEvent.click(screen.getByText('Push to Keitaro'))
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
-    expect(fetchMock.mock.calls.map((c) => String(c[0]))).toEqual([
+    await waitFor(() => expect(calls(fetchMock)).toHaveLength(2))
+    expect(calls(fetchMock).map((c) => String(c[0]))).toEqual([
       '/api/stream-offers/20/bring-back',
       '/api/streams/2/push',
     ])
@@ -94,8 +98,8 @@ describe('StreamCard', () => {
     await userEvent.clear(input)
     await userEvent.type(input, '70{Enter}')
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
-    const bodies = fetchMock.mock.calls.map((c) => JSON.parse(String(c[1]?.body)))
+    await waitFor(() => expect(calls(fetchMock)).toHaveLength(2))
+    const bodies = calls(fetchMock).map((c) => JSON.parse(String(c[1]?.body)))
     expect(bodies).toEqual([{ pinned: true }, { share: 70 }])
   })
 
@@ -168,6 +172,25 @@ describe('StreamCard', () => {
     await userEvent.click(within(panel).getByText('Undo'))
     await waitFor(() =>
       expect(fetchMock.mock.calls.map((c) => String(c[0]))).toContain('/api/streams/2/history/5/restore?version=before'),
+    )
+  })
+
+  it('editors cannot push', async () => {
+    mockFetch({ 'GET /api/me': { user: 'ed', role: 'editor', auth_enabled: true } })
+    renderCard({ ...stream, is_dirty: true })
+    await waitFor(() => expect(screen.getByText('Push to Keitaro')).toBeDisabled())
+    expect(screen.getByText('Push to Keitaro')).toHaveAttribute('title', 'Only publishers can push to Keitaro')
+    expect(screen.getByText('Cancel')).toBeEnabled()
+  })
+
+  it('a stream changed in Keitaro under the draft blocks push until confirmed', async () => {
+    const fetchMock = mockFetch({ 'POST /api/streams/2/acknowledge': { ...stream, is_dirty: true } })
+    renderCard({ ...stream, is_dirty: true, remote_changed_at: '2026-11-18T18:00:00+00:00' })
+    expect(screen.getByRole('alert')).toHaveTextContent('Keitaro changed while you were editing')
+    expect(screen.getByText('Push to Keitaro')).toBeDisabled()
+    await userEvent.click(screen.getByText('Draft is still right'))
+    await waitFor(() =>
+      expect(calls(fetchMock).map((c) => String(c[0]))).toEqual(['/api/streams/2/acknowledge']),
     )
   })
 })

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router'
-import { ApiError, api } from '../api'
+import { ApiError, api, type Period } from '../api'
 import { StreamCard } from '../components/StreamCard'
 
 export function EditorPage() {
@@ -12,6 +12,8 @@ export function EditorPage() {
   const campaign = useQuery({
     queryKey: ['campaign', id],
     queryFn: () => api.getCampaign(id),
+    // The server re-syncs with Keitaro in the background; pick that up.
+    refetchInterval: 30_000,
     retry: (count, error) => !(error instanceof ApiError && error.status === 404) && count < 2,
   })
 
@@ -26,6 +28,15 @@ export function EditorPage() {
   useEffect(() => {
     if (notFetched && isIdle) mutate()
   }, [notFetched, isIdle, mutate])
+
+  const [period, setPeriod] = useState<Period>('7d')
+  const stats = useQuery({
+    queryKey: ['stats', id, period],
+    queryFn: () => api.stats(id, period),
+    enabled: campaign.isSuccess,
+    staleTime: 60_000,
+  })
+  const statsByStream = new Map(stats.data?.streams.map((s) => [s.stream_id, s]))
 
   const data = campaign.data
   const dirty = data?.streams.some((s) => s.is_dirty)
@@ -50,10 +61,19 @@ export function EditorPage() {
             View in Keitaro ↗
           </a>
         )}
+        <label className="period">
+          Stats for{' '}
+          <select value={period} onChange={(e) => setPeriod(e.target.value as Period)} aria-label="Stats period">
+            <option value="today">today</option>
+            <option value="7d">last 7 days</option>
+            <option value="30d">last 30 days</option>
+          </select>
+        </label>
         {data?.fetched_at && <span className="muted">Last fetched {new Date(data.fetched_at).toLocaleString()}</span>}
       </div>
 
       {fetchStreams.error && <p className="error">{fetchStreams.error.message}</p>}
+      {stats.error && <p className="error">Stats: {stats.error.message}</p>}
       {campaign.error && !notFetched && <p className="error">{campaign.error.message}</p>}
       {(campaign.isPending || (notFetched && !fetchStreams.error)) && <p className="muted">Loading…</p>}
 
@@ -64,7 +84,7 @@ export function EditorPage() {
           </h1>
           {data.streams.length === 0 && <p className="muted">This campaign has no streams.</p>}
           {data.streams.map((stream) => (
-            <StreamCard key={stream.id} stream={stream} />
+            <StreamCard key={stream.id} stream={stream} stats={statsByStream.get(stream.id)} />
           ))}
         </>
       )}

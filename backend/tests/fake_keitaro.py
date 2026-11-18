@@ -25,6 +25,8 @@ class FakeKeitaro:
         self.groups = [KtNamed(id=3, name="FORTESTS"), KtNamed(id=4, name="Other")]
         self.sources = [KtNamed(id=5, name="FORTESTS"), KtNamed(id=6, name="Facebook")]
         self.calls: list[str] = []
+        self.report_rows: list[dict[str, Any]] = []
+        self.report_requests: list[dict[str, Any]] = []
         # method name -> exception to raise on the next call
         self.fail: dict[str, Exception] = {}
         self._ids = itertools.count(1000)
@@ -34,12 +36,13 @@ class FakeKeitaro:
     def add_offer(self, offer_id: int, name: str, state: str = "active") -> None:
         self.offers[offer_id] = KtOffer(id=offer_id, name=name, state=state)
 
-    def add_campaign(self, campaign_id: int, name: str) -> None:
+    def add_campaign(self, campaign_id: int, name: str, group_id: int | None = None) -> None:
         self.campaigns[campaign_id] = {
             "id": campaign_id,
             "name": name,
             "alias": "abc",
             "state": "active",
+            "group_id": group_id,
         }
 
     def add_stream(
@@ -157,6 +160,12 @@ class FakeKeitaro:
     async def list_traffic_sources(self) -> list[KtNamed]:
         self._call("list_traffic_sources")
         return self.sources
+
+    async def build_report(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        self._call("build_report")
+        self.report_requests.append(payload)
+        campaign = next(f["expression"] for f in payload["filters"] if f["name"] == "campaign_id")
+        return [r for r in self.report_rows if r.get("campaign_id", campaign) == campaign]
 
 
 __all__ = ["FakeKeitaro", "KeitaroError", "KeitaroUnavailableError", "KtStreamOffer"]

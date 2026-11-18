@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { api, type Meta, type Named } from '../api'
 import { OfferSearch } from '../components/OfferSearch'
+import { useMe } from '../useMe'
 
 export function CampaignsPage() {
   return (
@@ -26,6 +27,7 @@ function NewCampaign() {
 }
 
 export function CampaignForm({ meta }: { meta: Meta }) {
+  const { canPublish } = useMe()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [name, setName] = useState('')
@@ -96,7 +98,8 @@ export function CampaignForm({ meta }: { meta: Meta }) {
             {create.error.message}
           </p>
         )}
-        <button className="primary" type="submit" disabled={!offer || create.isPending}>
+        {!canPublish && <p className="muted">Only publishers can create campaigns.</p>}
+        <button className="primary" type="submit" disabled={!offer || create.isPending || !canPublish}>
           {create.isPending ? 'Creating…' : 'Create'}
         </button>
       </div>

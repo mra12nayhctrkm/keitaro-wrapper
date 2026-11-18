@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Protocol
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+
+from app.observability import record_keitaro_call
 
 
 class KeitaroError(Exception):
@@ -37,6 +40,7 @@ class KtCampaign(_Model):
     name: str
     alias: str | None = None
     state: str | None = None
+    group_id: int | None = None
 
 
 class KtOffer(_Model):
@@ -81,6 +85,7 @@ class KeitaroApi(Protocol):
     async def list_domains(self) -> list[KtNamed]: ...
     async def list_campaign_groups(self) -> list[KtNamed]: ...
     async def list_traffic_sources(self) -> list[KtNamed]: ...
+    async def build_report(self, payload: dict[str, Any]) -> list[dict[str, Any]]: ...
 
 
 _campaigns = TypeAdapter(list[KtCampaign])
@@ -114,18 +119,27 @@ class KeitaroClient:
         await self._http.aclose()
 
     async def _request(
-        self, method: str, path: str, *, json: Any = None, params: dict[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        params: dict[str, Any] | None = None,
+        retry: bool | None = None,
     ) -> Any:
-        idempotent = method in {"GET", "PUT", "DELETE"}
+        idempotent = method in {"GET", "PUT", "DELETE"} if retry is None else retry
         attempts = 1 + (_RETRIES if idempotent else 0)
         for attempt in range(1, attempts + 1):
+            started = time.perf_counter()
             try:
                 response = await self._http.request(method, path, json=json, params=params)
             except httpx.TransportError as exc:
+                record_keitaro_call(method, path, "error", time.perf_counter() - started)
                 if attempt < attempts:
                     await asyncio.sleep(self._backoff * 2 ** (attempt - 1))
                     continue
                 raise KeitaroUnavailableError(f"Keitaro is unreachable: {exc}") from exc
+            record_keitaro_call(method, path, response.status_code, time.perf_counter() - started)
             if response.status_code >= 500 and attempt < attempts:
                 await asyncio.sleep(self._backoff * 2 ** (attempt - 1))
                 continue
@@ -180,6 +194,15 @@ class KeitaroClient:
 
     async def list_traffic_sources(self) -> list[KtNamed]:
         return _named.validate_python(await self._request("GET", "/traffic_sources"))
+
+    async def build_report(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        # A read-only POST, so it is safe to retry like a GET.
+        return _rows(await self._request("POST", "/report/build", json=payload, retry=True))
+
+
+def _rows(body: Any) -> list[dict[str, Any]]:
+    rows = body.get("rows", []) if isinstance(body, dict) else []
+    return [r for r in rows if isinstance(r, dict)]
 
 
 def _error_message(response: httpx.Response) -> str:

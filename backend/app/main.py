@@ -1,20 +1,21 @@
-import base64
-import binascii
-import hmac
+import asyncio
+import contextlib
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import IntegrityError
 
+from app import auth, observability
 from app.api.routes import router
 from app.config import Settings, get_settings
 from app.db import create_engine, create_sessionmaker
 from app.keitaro.client import KeitaroApi, KeitaroClient, KeitaroError, KeitaroUnavailableError
+from app.services import sync
 from app.services.errors import DomainError
 from app.services.offers import OfferCatalog
 
@@ -30,6 +31,8 @@ def create_app(
 ) -> FastAPI:
     """App factory. Tests pass their own settings and a fake Keitaro."""
     settings = settings or get_settings()
+    observability.configure_logging(settings)
+    observability.configure_sentry(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -48,9 +51,24 @@ def create_app(
         app.state.sessionmaker = create_sessionmaker(engine)
         app.state.keitaro = api
         app.state.catalog = OfferCatalog(api, settings.offers_cache_ttl)
+        sync_task = None
+        if settings.auto_sync_interval > 0:
+            sync_task = asyncio.create_task(
+                sync.run_forever(
+                    settings.auto_sync_interval,
+                    app.state.sessionmaker,
+                    api,
+                    app.state.catalog,
+                )
+            )
+        app.state.sync_task = sync_task
         try:
             yield
         finally:
+            if sync_task is not None:
+                sync_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await sync_task
             if client is not None:
                 await client.aclose()
             await engine.dispose()
@@ -59,9 +77,8 @@ def create_app(
     app.state.settings = settings
     app.include_router(router)
 
-    password = settings.app_password.get_secret_value()
-    if password:
-        _add_basic_auth(app, settings.app_username, password)
+    auth.install(app, settings)
+    observability.install(app)  # added last = outermost: sees every request, even 401s
 
     @app.get("/api/health", include_in_schema=False)
     async def health() -> dict[str, str]:
@@ -99,31 +116,6 @@ def create_app(
         _mount_frontend(app, frontend_dist)
 
     return app
-
-
-def _add_basic_auth(app: FastAPI, username: str, password: str) -> None:
-    """Protect everything except the health check with HTTP Basic auth."""
-    expected = f"{username}:{password}".encode()
-
-    @app.middleware("http")
-    async def basic_auth(
-        request: Request, call_next: Callable[[Request], Awaitable[Response]]
-    ) -> Response:
-        if request.url.path == "/api/health":
-            return await call_next(request)
-        scheme, _, encoded = request.headers.get("Authorization", "").partition(" ")
-        try:
-            given = base64.b64decode(encoded, validate=True) if scheme.lower() == "basic" else b""
-        except binascii.Error:
-            given = b""
-        # Constant-time comparison: no timing hints about the password.
-        if not hmac.compare_digest(given, expected):
-            return Response(
-                status_code=401,
-                headers={"WWW-Authenticate": 'Basic realm="Keitaro Wrapper", charset="UTF-8"'},
-            )
-        request.state.user = username
-        return await call_next(request)
 
 
 def _mount_frontend(app: FastAPI, dist: Path) -> None:

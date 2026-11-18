@@ -7,7 +7,22 @@
    - **поток 2**: всех остальных отправляет на выбранный оффер.
 2. **Редактор существующей кампании** повторяет логику из видео к ТЗ: офферы можно добавлять, удалять и возвращать, веса закреплять (pin), изменения копятся как черновик и публикуются кнопкой «Push to Keitaro».
 
-**Стек:** FastAPI, SQLAlchemy 2 (async), Alembic, httpx, Pydantic v2 · React 19, TypeScript, Vite, TanStack Query · pytest, respx, Hypothesis, Vitest, Testing Library · uv, ruff, mypy (strict), oxlint · Docker · GitHub Actions.
+Сверх ТЗ:
+- статистика и тренды по офферам из отчётов Keitaro;
+- журнал публикаций с Undo;
+- роли и SSO;
+- фоновая синхронизация с защитой черновиков;
+- массовая замена оффера с предпросмотром;
+- метрики Prometheus, JSON-логи, Sentry;
+- E2E-тесты на Playwright.
+
+**Стек:**
+- **Бэкенд:** FastAPI, асинхронный SQLAlchemy 2, Alembic, httpx, Pydantic v2;
+- **Фронтенд:** React 19, TypeScript, Vite, TanStack Query;
+- **Базы данных:** PostgreSQL 17 и SQLite;
+- **Тесты:** pytest, respx, Hypothesis, Vitest, Testing Library, Playwright;
+- **Наблюдаемость:** prometheus-client, Sentry;
+- **Инструменты:** uv, ruff, mypy в строгом режиме, oxlint, Docker, GitHub Actions.
 
 ---
 
@@ -128,9 +143,53 @@ PostgreSQL поддерживается из коробки (драйвер `asy
 
 И то, и другое публикуется обычным Push, так что прошлую версию можно сначала посмотреть.
 
-### Доступ
+### Статистика и тренды
 
-Если в `.env` задан `APP_PASSWORD`, вся обёртка, кроме `/api/health`, закрывается HTTP Basic авторизацией: браузер сам спросит логин и пароль. Имя пользователя (`APP_USERNAME`) записывается в журнал публикаций. Пароль сравнивается за постоянное время, чтобы по времени ответа нельзя было подбирать его.
+В редакторе у каждого оффера есть колонки:
+- **Stats**: клики, конверсии, CR, EPC, доход;
+- **Trends**: график кликов по дням.
+
+Период выбирается сверху: сегодня, 7 или 30 дней. Данные берутся из `POST /report/build` Keitaro с разбивкой по потоку, офферу и дню. Дни считаются в часовом поясе `STATS_TIMEZONE`.
+
+### Фоновая синхронизация и конфликты
+
+Раз в `AUTO_SYNC_INTERVAL` секунд (по умолчанию 300) обёртка заново загружает из Keitaro все известные ей кампании. Интерфейс подхватывает изменения каждые 30 секунд.
+
+Если Keitaro изменился под чьим-то черновиком, черновик собран на старой версии, и молча публиковать его опасно. Поэтому поток помечается красным предупреждением, и **Push блокируется**, пока пользователь не подтвердит черновик («Draft is still right») или не отменит его.
+
+### Массовая замена оффера
+
+Страница **Bulk replace**: выберите группу кампаний, фильтр по имени (по умолчанию ваш префикс), оффер «что» и оффер «на что».
+1. **Preview** параллельно сканирует кампании группы и показывает каждый поток «было → стало». Это только чтение.
+2. Отметьте нужные потоки галочками.
+3. **Apply as drafts** создаёт черновики, которые можно посмотреть в редакторе. **Apply and publish** сразу публикует и спрашивает подтверждение.
+
+Каждый поток применяется отдельной транзакцией: ошибка в одном не мешает остальным. Повторное применение безопасно.
+
+### Доступ и роли
+
+Роли:
+- **editor** готовит черновики;
+- **publisher** может ещё публиковать в Keitaro, создавать кампании и делать массовую публикацию.
+
+Способы входа:
+- `APP_USERS=alice:pass:publisher,bob:pass:editor` — несколько пользователей через HTTP Basic;
+- `APP_USERNAME` / `APP_PASSWORD` — один publisher;
+- **SSO** через доверенный обратный прокси (например, [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) с Google Workspace или Okta). Прокси передаёт пользователя в заголовке `TRUSTED_USER_HEADER`, а `SSO_PUBLISHERS` перечисляет тех, кто может публиковать. Включайте это, только если приложение доступно исключительно через прокси.
+
+Без настроек приложение открыто, и публиковать могут все: это для локального запуска. Пользователь записывается в журнал публикаций. Пароли сравниваются за постоянное время.
+
+### Наблюдаемость
+
+- **ID запроса.** Каждый ответ содержит `X-Request-ID`, переданный клиентом или сгенерированный. Он есть в каждой строке лога этого запроса.
+- **Логи.** `LOG_FORMAT=json` пишет одну JSON-строку на событие (для Loki или ELK): метод, путь, статус, длительность, пользователь.
+- **Метрики.** `/metrics` отдаёт метрики Prometheus:
+  - запросы к API по маршрутам;
+  - запросы к Keitaro по эндпоинтам, со статусами и временем ответа;
+  - `keitaro_api_key_valid`;
+  - метрики автосинхронизации.
+- **Алерты.** Примеры правил лежат в [`deploy/prometheus-alerts.yml`](deploy/prometheus-alerts.yml), в том числе «Keitaro отвергает ключ API».
+- **Sentry.** `SENTRY_DSN` включает отправку ошибок. Если ключ перестал работать, это ERROR в логе один раз на сбой, а не на каждый запрос.
 
 ## API
 
@@ -150,6 +209,12 @@ PostgreSQL поддерживается из коробки (драйвер `asy
 | PATCH | `/api/stream-offers/{id}` | `{"pinned": true}` или `{"share": 40}` (задать и закрепить) |
 | GET | `/api/streams/{id}/history` | журнал публикаций, новые сверху |
 | POST | `/api/streams/{id}/history/{log}/restore?version=after\|before` | вернуть версию (или отменить публикацию) как черновик |
+| POST | `/api/streams/{id}/acknowledge` | подтвердить черновик после изменения в Keitaro |
+| GET | `/api/campaigns/{id}/stats?period=today\|7d\|30d` | статистика и тренды по офферам |
+| POST | `/api/bulk/replace-offer/preview` | какие потоки затронет замена |
+| POST | `/api/bulk/replace-offer/apply` | применить к выбранным потокам (`publish: true` — сразу опубликовать) |
+| GET | `/api/me` | текущий пользователь и роль |
+| GET | `/metrics` | метрики Prometheus |
 
 Ошибки Keitaro превращаются в понятные ответы:
 - 422, если Keitaro отклонил данные, например `Keitaro: name: Name has already used`;
@@ -167,9 +232,17 @@ make test     # backend (pytest) + frontend (vitest)
 make check    # + ruff, mypy --strict, oxlint, tsc — то же, что в CI
 ```
 
-- **Backend: 102 теста, покрытие 98%.** Каждый тест поднимает схему через `alembic upgrade head` и откатывает через `downgrade base`, так что обе стороны миграций проверяются постоянно. Keitaro подменяется фейком в памяти (`tests/fake_keitaro.py`), сценарий из видео пройден по шагам через HTTP API (`tests/test_editor.py`). HTTP-клиент проверяется отдельно через respx: заголовки, ошибки, повторы. Распределение весов дополнительно проверяется property-based тестами на Hypothesis: сумма всегда 100, закреплённые доли не меняются, разница между незакреплёнными не больше 1.
-- **Frontend: 13 тестов на Vitest + Testing Library.** Кнопки шлют правильные запросы, ответ сразу попадает в кэш, ошибки показываются пользователю.
-- **CI** (GitHub Actions): линтеры, типы, миграции, тесты бэкенда **на SQLite и на PostgreSQL**, тесты и сборка фронта, сборка Docker-образа.
+- **Backend: 136 тестов, покрытие 98%.** Каждый тест поднимает схему через `alembic upgrade head` и откатывает через `downgrade base`, так что обе стороны миграций проверяются постоянно. Keitaro подменяется фейком в памяти (`tests/fake_keitaro.py`), сценарий из видео пройден по шагам через HTTP API (`tests/test_editor.py`). HTTP-клиент проверяется отдельно через respx: заголовки, ошибки, повторы. Распределение весов дополнительно проверяется property-based тестами на Hypothesis: сумма всегда 100, закреплённые доли не меняются, разница между незакреплёнными не больше 1.
+- **Frontend: 17 тестов на Vitest + Testing Library.** Кнопки шлют правильные запросы, ответ сразу попадает в кэш, ошибки показываются пользователю.
+- **E2E: Playwright.** Настоящее приложение (API и собранный интерфейс) с фейковым Keitaro, в Chromium. Проверяемые сценарии:
+  - создать кампанию;
+  - добавить оффер и опубликовать;
+  - удалить оффер и отменить удаление;
+  - отменить публикацию через журнал;
+  - массовая замена.
+
+  Состояние «Keitaro» проверяется через служебный эндпоинт тестового сервера: `cd frontend && npm run e2e`.
+- **CI** (GitHub Actions): линтеры, типы, миграции, тесты бэкенда **на SQLite и на PostgreSQL**, тесты и сборка фронта, **E2E на Playwright**, сборка Docker-образа.
 
 Локально на PostgreSQL:
 
@@ -197,17 +270,24 @@ backend/
     config.py          настройки из .env
     models.py          SQLAlchemy-модели: Campaign, Stream, StreamOffer
     keitaro/client.py  типизированный клиент Keitaro Admin API
+    auth.py            вход (Basic / SSO-прокси) и роли
+    observability.py   ID запросов, JSON-логи, метрики, Sentry
     services/
       creator.py       создание кампании
-      editor.py        черновики, push, синхронизация
+      editor.py        черновики, push, журнал, конфликты
       weights.py       распределение долей
       offers.py        каталог офферов с кэшем
+      stats.py         статистика и тренды из отчётов Keitaro
+      sync.py          фоновая синхронизация
+      bulk.py          массовая замена оффера
     api/               роуты и зависимости FastAPI
   migrations/          Alembic
-  tests/
-frontend/src/
-  pages/               список и создание кампаний, редактор
-  components/          StreamCard, OfferSearch (автокомплит)
+  tests/               pytest + e2e_server.py для Playwright
+frontend/
+  src/pages/           кампании, редактор, массовая замена
+  src/components/      StreamCard, OfferSearch, HistoryPanel, Sparkline
+  e2e/                 сценарии Playwright
+deploy/                примеры правил алертов Prometheus
 ```
 
 ## Настройки (`.env`)
@@ -220,4 +300,10 @@ frontend/src/
 | `CAMPAIGN_PREFIX` | `test_mkrtchyan_` | префикс названий кампаний |
 | `DEFAULT_DOMAIN` / `DEFAULT_GROUP` / `DEFAULT_TRAFFIC_SOURCE` | `in.posdk.xyz` / `FORTESTS` / `FORTESTS` | что подставлять в форму |
 | `GEO_REDIRECT_URL` | `https://google.com` | куда ведёт гео-поток |
-| `APP_USERNAME` / `APP_PASSWORD` | `admin` / пусто | вход в обёртку (HTTP Basic); пустой пароль отключает вход |
+| `APP_USERNAME` / `APP_PASSWORD` | `admin` / пусто | один пользователь-publisher (HTTP Basic) |
+| `APP_USERS` | пусто | `name:password:role,...`, роли `editor` / `publisher` |
+| `TRUSTED_USER_HEADER` / `SSO_PUBLISHERS` | пусто | SSO через доверенный прокси |
+| `AUTO_SYNC_INTERVAL` | `300` | фоновая синхронизация, секунды (0 — выключить) |
+| `STATS_TIMEZONE` | `Europe/Moscow` | часовой пояс дневной статистики |
+| `LOG_FORMAT` / `LOG_LEVEL` | `text` / `INFO` | `json` для продакшена |
+| `SENTRY_DSN` / `ENVIRONMENT` | пусто / `development` | отправка ошибок в Sentry |

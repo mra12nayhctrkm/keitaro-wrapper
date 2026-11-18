@@ -62,6 +62,9 @@ class Stream(Base):
     type: Mapped[str] = mapped_column(String(32))
     schema: Mapped[str | None] = mapped_column(String(32))
     position: Mapped[int] = mapped_column(Integer, default=0)
+    # Set when a fetch finds that Keitaro changed while this stream had a draft:
+    # the draft was built on an older version, so pushing is blocked until reviewed.
+    remote_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     campaign: Mapped[Campaign] = relationship(back_populates="streams")
     offers: Mapped[list[StreamOffer]] = relationship(

@@ -73,6 +73,7 @@ class StreamOut(_Out):
     position: int
     has_offers: bool
     is_dirty: bool
+    remote_changed_at: UtcDatetime | None
     total_share: int
     offers: list[StreamOfferOut]
 
@@ -108,3 +109,81 @@ class AddOffer(BaseModel):
 class UpdateOffer(BaseModel):
     pinned: bool | None = None
     share: int | None = Field(default=None, ge=0, le=100)
+
+
+class MetricsOut(BaseModel):
+    clicks: int
+    conversions: int
+    revenue: float
+    cr: float
+    epc: float
+
+
+class OfferStatsOut(MetricsOut):
+    offer_id: int
+    daily_clicks: list[int]
+    daily_conversions: list[int]
+
+
+class StreamStatsOut(MetricsOut):
+    stream_id: int
+    offers: list[OfferStatsOut]
+
+
+class CampaignStatsOut(BaseModel):
+    period: str
+    days: list[str]
+    streams: list[StreamStatsOut]
+
+
+class MeOut(BaseModel):
+    user: str | None
+    role: str
+    auth_enabled: bool
+
+
+class BulkReplaceQuery(BaseModel):
+    group_id: int = Field(gt=0)
+    from_offer_id: int = Field(gt=0)
+    to_offer_id: int = Field(gt=0)
+    name_filter: str = Field(default="", description="Only campaigns whose name contains this")
+
+
+class OfferShare(BaseModel):
+    offer_id: int
+    share: int
+
+
+class BulkChangeOut(BaseModel):
+    campaign_id: int
+    campaign_name: str
+    stream_id: int
+    stream_name: str
+    before: list[OfferShare]
+    after: list[OfferShare]
+
+
+class BulkPreviewOut(BaseModel):
+    scanned_campaigns: int
+    changes: list[BulkChangeOut]
+    errors: list[str]
+
+
+class BulkTarget(BaseModel):
+    campaign_id: int = Field(gt=0)
+    stream_id: int = Field(gt=0)
+
+
+class BulkApply(BaseModel):
+    from_offer_id: int = Field(gt=0)
+    to_offer_id: int = Field(gt=0)
+    # Explicit list from the preview: nothing is changed that wasn't reviewed.
+    targets: list[BulkTarget] = Field(min_length=1, max_length=500)
+    publish: bool = False
+
+
+class BulkOutcomeOut(BaseModel):
+    campaign_id: int
+    stream_id: int
+    status: str
+    detail: str

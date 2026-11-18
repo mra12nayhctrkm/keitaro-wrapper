@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.keitaro.client import KeitaroApi, KeitaroError, KtStreamOffer
-from app.models import Campaign, OfferState, PublishLog, Stream, StreamOffer
+from app.models import Campaign, OfferState, OfferStatus, PublishLog, Stream, StreamOffer
 from app.services.errors import ConflictError, NotFoundError, ValidationError
 from app.services.offers import OfferCatalog
 from app.services.weights import TOTAL, Slot, distribute
@@ -101,7 +101,11 @@ class StreamEditor:
             stream.type = kt.type
             stream.schema = kt.flow_schema
             stream.position = kt.position
-            _reconcile(stream, kt.offers, names)
+            had_draft = stream.is_dirty
+            if _reconcile(stream, kt.offers, names) and had_draft:
+                stream.remote_changed_at = datetime.now(UTC)
+            if not stream.is_dirty:
+                stream.remote_changed_at = None  # nothing left to conflict with
 
         # Streams deleted in Keitaro disappear here too.
         campaign.streams = [s for s in campaign.streams if s.id in seen]
@@ -168,6 +172,58 @@ class StreamEditor:
             link.pinned = pinned
         return await self._save(stream, rebalance=True)
 
+    async def replace_offer(self, stream_id: int, from_offer: int, to_offer: int) -> Stream:
+        """Draft: send the traffic share of `from_offer` to `to_offer` instead."""
+        if from_offer == to_offer:
+            raise ValidationError("Choose two different offers.")
+        stream = await self._editable_stream(stream_id)
+        source = next(
+            (o for o in stream.offers if o.offer_id == from_offer and o.state is OfferState.ACTIVE),
+            None,
+        )
+        if source is None:
+            # Idempotent: the same replacement is already drafted (e.g. "apply as
+            # drafts" first, "apply and publish" second) - nothing more to change.
+            already = any(
+                o.offer_id == from_offer and o.status is OfferStatus.PENDING_REMOVE
+                for o in stream.offers
+            ) and any(
+                o.offer_id == to_offer and o.state is OfferState.ACTIVE for o in stream.offers
+            )
+            if already:
+                return stream
+            raise ValidationError(f"Offer {from_offer} is not active in stream {stream_id}.")
+        target_offer = await self._catalog.get(to_offer)
+        share = source.share
+
+        if source.published_state is None:
+            stream.offers.remove(source)
+        else:
+            source.state = OfferState.REMOVED
+            source.share = 0
+            source.pinned = False
+
+        target = next((o for o in stream.offers if o.offer_id == to_offer), None)
+        if target is None:
+            stream.offers.append(
+                StreamOffer(
+                    offer_id=target_offer.id,
+                    offer_name=target_offer.name,
+                    state=OfferState.ACTIVE,
+                    share=share,
+                    pinned=False,
+                    published_state=None,
+                    published_share=None,
+                    kt_state="active",
+                )
+            )
+        elif target.state is OfferState.ACTIVE:
+            target.share += share  # already there: it takes over the share too
+        else:
+            target.state = OfferState.ACTIVE
+            target.share = share
+        return await self._save(stream, rebalance=False)
+
     async def cancel(self, stream_id: int) -> Stream:
         """Drop all unpublished changes of a stream."""
         stream = await self._editable_stream(stream_id)
@@ -177,6 +233,13 @@ class StreamEditor:
             else:
                 link.state = link.published_state
                 link.share = link.published_share or 0
+        stream.remote_changed_at = None
+        return await self._save(stream, rebalance=False)
+
+    async def acknowledge(self, stream_id: int) -> Stream:
+        """The user reviewed what changed in Keitaro under their draft; allow pushing."""
+        stream = await self._editable_stream(stream_id)
+        stream.remote_changed_at = None
         return await self._save(stream, rebalance=False)
 
     # ---- publish ---------------------------------------------------------
@@ -186,6 +249,11 @@ class StreamEditor:
         stream = await self._editable_stream(stream_id)
         if not stream.is_dirty:
             return stream
+        if stream.remote_changed_at is not None:
+            raise ConflictError(
+                "Keitaro changed under your draft. Review the stream, then confirm "
+                "the draft is still right (or cancel it) before pushing."
+            )
 
         active = [o for o in stream.offers if o.state is OfferState.ACTIVE]
         if active and stream.total_share != TOTAL:
@@ -216,6 +284,7 @@ class StreamEditor:
             },
         )
         _reconcile(stream, updated.offers, {})
+        stream.remote_changed_at = None
         self._session.add(
             PublishLog(
                 stream_id=stream.id,
@@ -303,13 +372,21 @@ class StreamEditor:
         return await self.get_stream(stream.id)
 
 
-def _reconcile(stream: Stream, remote: Iterable[KtStreamOffer], names: dict[int, str]) -> None:
+def _reconcile(stream: Stream, remote: Iterable[KtStreamOffer], names: dict[int, str]) -> bool:
     """
     Make Keitaro's offers the new published state of the stream.
     Unchanged offers follow Keitaro; offers with a pending draft keep the draft.
     An offer that vanished from Keitaro becomes "removed" (kept in our archive).
+
+    Returns True if Keitaro's offers differ from the published state we knew.
     """
     live = _live(remote)
+    published_before = {
+        o.offer_id: (o.published_share, o.kt_state)
+        for o in stream.offers
+        if o.published_state is OfferState.ACTIVE
+    }
+    changed = published_before != {o.offer_id: (o.share, o.state) for o in live}
     remote_shares = {o.offer_id: o.share for o in live}
     remote_states = {o.offer_id: o.state for o in live}
 
@@ -345,6 +422,7 @@ def _reconcile(stream: Stream, remote: Iterable[KtStreamOffer], names: dict[int,
                     kt_state=remote_states[offer_id],
                 )
             )
+    return changed
 
 
 def _live(offers: Iterable[KtStreamOffer]) -> list[KtStreamOffer]:

@@ -6,6 +6,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from asgi_lifespan import LifespanManager
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from app.config import Settings
@@ -24,6 +25,7 @@ def settings(tmp_path: Path) -> Settings:
         or f"sqlite+aiosqlite:///{tmp_path / 'test.db'}",
         keitaro_api_key="test-key",
         campaign_prefix="test_mkrtchyan_",
+        auto_sync_interval=0,  # tests drive syncing explicitly
     )
 
 
@@ -54,10 +56,12 @@ def keitaro() -> FakeKeitaro:
 
 
 @pytest.fixture
-async def client(
-    settings: Settings, migrated_db: None, keitaro: FakeKeitaro
-) -> AsyncIterator[AsyncClient]:
-    app = create_app(settings, keitaro=keitaro, frontend_dist=None)
+def app(settings: Settings, keitaro: FakeKeitaro) -> FastAPI:
+    return create_app(settings, keitaro=keitaro, frontend_dist=None)
+
+
+@pytest.fixture
+async def client(app: FastAPI, migrated_db: None) -> AsyncIterator[AsyncClient]:
     async with LifespanManager(app) as manager:
         transport = ASGITransport(app=manager.app)
         async with AsyncClient(transport=transport, base_url="http://test") as http:

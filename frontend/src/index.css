@@ -60,6 +60,17 @@ a {
   padding: 12px 16px;
 }
 
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.who {
+  color: #c7cede;
+  font-size: 13px;
+}
+
 .brand {
   color: #fff;
   font-weight: 600;
@@ -345,4 +356,63 @@ tr.offer.pending_add {
 .history-offers {
   font-size: 13px;
   margin-top: 2px;
+}
+
+td.stats {
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.sparkline {
+  color: var(--accent);
+  display: block;
+}
+
+.period select {
+  width: auto;
+}
+
+@media (max-width: 700px) {
+  table th:nth-child(4),
+  table td:nth-child(4) {
+    display: none; /* hide trends on narrow screens */
+  }
+}
+
+.conflict {
+  border: 1px solid #f04438;
+  background: #fef3f2;
+  color: #7a271a;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.conflict .actions {
+  margin-top: 8px;
+  justify-content: flex-start;
+}
+
+.nav {
+  display: flex;
+  gap: 16px;
+  margin-right: auto;
+  margin-left: 24px;
+}
+
+.nav a {
+  color: #c7cede;
+  text-decoration: none;
+}
+
+.nav a:hover {
+  color: #fff;
+}
+
+.bulk-results {
+  margin-top: 20px;
+}
+
+.bulk-actions {
+  margin-top: 12px;
 }
