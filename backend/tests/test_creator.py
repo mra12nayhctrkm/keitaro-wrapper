@@ -128,7 +128,7 @@ async def test_rolls_back_campaign_when_a_stream_fails(
 ) -> None:
     keitaro.fail["create_stream"] = error
     response = await client.post("/api/campaigns", json={"name": "x", "geo": "AU", "offer_id": 11})
-    assert response.status_code in (502, 503)
+    assert response.status_code in (422, 503)
     assert "delete_campaign" in keitaro.calls
     (campaign,) = keitaro.campaigns.values()
     assert campaign["state"] == "deleted"
@@ -140,7 +140,7 @@ async def test_failed_rollback_still_reports_the_original_error(
     keitaro.fail["create_stream"] = KeitaroError(400, "bad filter")
     keitaro.fail["delete_campaign"] = KeitaroError(500, "boom")
     response = await client.post("/api/campaigns", json={"name": "x", "geo": "AU", "offer_id": 11})
-    assert response.status_code == 502
+    assert response.status_code == 422
     assert "bad filter" in response.json()["detail"]
 
 
@@ -150,3 +150,13 @@ async def test_single_domain_is_used_when_default_is_missing(
     keitaro.domains = keitaro.domains[:1]  # only "other.example" is available
     response = await client.get("/api/meta")
     assert response.json()["default_domain_id"] == 1
+
+
+async def test_keitaro_validation_error_is_a_readable_422(
+    client: AsyncClient, keitaro: FakeKeitaro
+) -> None:
+    keitaro.fail["create_campaign"] = KeitaroError(400, "name: Name has already been used")
+    response = await client.post("/api/campaigns", json={"name": "x", "geo": "AU", "offer_id": 11})
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Keitaro: name: Name has already been used"
+    assert "create_stream" not in keitaro.calls

@@ -64,3 +64,21 @@ def test_settings_urls() -> None:
     s = Settings(_env_file=None, keitaro_url="https://kt.example/")
     assert s.keitaro_api_url == "https://kt.example/admin_api/v1"
     assert s.keitaro_admin_url == "https://kt.example/admin"
+
+
+@pytest.mark.usefixtures("migrated_db")
+async def test_db_integrity_race_is_a_409(settings: Settings, keitaro: FakeKeitaro) -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    app = create_app(settings, keitaro=keitaro, frontend_dist=None)
+
+    @app.get("/boom")
+    async def boom() -> None:
+        raise IntegrityError("INSERT", {}, Exception("UNIQUE constraint failed"))
+
+    async with (
+        LifespanManager(app) as manager,
+        AsyncClient(transport=ASGITransport(app=manager.app), base_url="http://test") as http,
+    ):
+        response = await http.get("/boom")
+    assert response.status_code == 409

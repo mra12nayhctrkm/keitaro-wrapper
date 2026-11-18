@@ -1,5 +1,6 @@
 """Campaign creator: one campaign, two streams (geo → Google, everyone else → offer)."""
 
+import asyncio
 import logging
 import re
 import secrets
@@ -80,9 +81,11 @@ class CampaignCreator:
         self._settings = settings
 
     async def options(self) -> tuple[list[KtNamed], list[KtNamed], list[KtNamed], Defaults]:
-        domains = await self._keitaro.list_domains()
-        groups = await self._keitaro.list_campaign_groups()
-        sources = await self._keitaro.list_traffic_sources()
+        domains, groups, sources = await asyncio.gather(
+            self._keitaro.list_domains(),
+            self._keitaro.list_campaign_groups(),
+            self._keitaro.list_traffic_sources(),
+        )
         defaults = Defaults(
             domain_id=_find_by_name(domains, self._settings.default_domain),
             group_id=_find_by_name(groups, self._settings.default_group),

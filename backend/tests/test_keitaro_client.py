@@ -11,7 +11,7 @@ BASE = "https://kt.test/admin_api/v1"
 
 @pytest.fixture
 async def kt() -> AsyncIterator[KeitaroClient]:
-    client = KeitaroClient(BASE, "secret-key", timeout=1)
+    client = KeitaroClient(BASE, "secret-key", timeout=1, backoff=0)
     yield client
     await client.aclose()
 
@@ -63,6 +63,19 @@ async def test_post_sends_json_body(kt: KeitaroClient) -> None:
         (httpx.Response(400, json={"error": "Alias already exists"}), "Alias already exists"),
         (httpx.Response(422, json={"message": "Invalid"}), "Invalid"),
         (httpx.Response(404, text="Not Found"), "Not Found"),
+        # The real Keitaro shape for validation errors
+        (
+            httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "name": ["Name has already been used"],
+                        "action_type": ["Required", "Bad"],
+                    }
+                },
+            ),
+            "name: Name has already been used; action_type: Required, Bad",
+        ),
     ],
 )
 async def test_error_message_is_extracted(
@@ -125,3 +138,20 @@ async def test_all_read_endpoints(kt: KeitaroClient) -> None:
     assert (await kt.update_stream(2, {"offers": []})).id == 2
     assert (await kt.get_offer(3)).name == "o"
     assert (await kt.list_traffic_sources())[0].id == 4
+
+
+@respx.mock
+async def test_retries_back_off_exponentially(monkeypatch: pytest.MonkeyPatch) -> None:
+    delays: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    monkeypatch.setattr("app.keitaro.client.asyncio.sleep", fake_sleep)
+    respx.get(f"{BASE}/offers").mock(
+        side_effect=[httpx.Response(502), httpx.Response(503), httpx.Response(200, json=[])]
+    )
+    client = KeitaroClient(BASE, "k", backoff=0.5)
+    await client.list_offers()
+    await client.aclose()
+    assert delays == [0.5, 1.0]

@@ -121,6 +121,7 @@ class StreamEditor:
                     pinned=False,
                     published_state=None,
                     published_share=None,
+                    kt_state="active",
                 )
             )
         return await self._save(stream, rebalance=True)
@@ -185,7 +186,7 @@ class StreamEditor:
         # Optimistic concurrency: refuse to overwrite edits made in Keitaro
         # after our last fetch, they would be silently lost.
         remote = await self._keitaro.get_stream(stream_id)
-        remote_offers = {o.offer_id: o.share for o in remote.offers}
+        remote_offers = {o.offer_id: o.share for o in _live(remote.offers)}
         known_offers = {
             o.offer_id: o.published_share
             for o in stream.offers
@@ -201,7 +202,7 @@ class StreamEditor:
             stream_id,
             {
                 "offers": [
-                    {"offer_id": o.offer_id, "share": o.share, "state": "active"} for o in active
+                    {"offer_id": o.offer_id, "share": o.share, "state": o.kt_state} for o in active
                 ],
             },
         )
@@ -241,13 +242,16 @@ def _reconcile(stream: Stream, remote: Iterable[KtStreamOffer], names: dict[int,
     Unchanged offers follow Keitaro; offers with a pending draft keep the draft.
     An offer that vanished from Keitaro becomes "removed" (kept in our archive).
     """
-    remote_shares = {o.offer_id: o.share for o in remote if o.state != "deleted"}
+    live = _live(remote)
+    remote_shares = {o.offer_id: o.share for o in live}
+    remote_states = {o.offer_id: o.state for o in live}
 
     for link in stream.offers:
         was_dirty = link.is_dirty
         if link.offer_id in remote_shares:
             link.published_state = OfferState.ACTIVE
             link.published_share = remote_shares[link.offer_id]
+            link.kt_state = remote_states[link.offer_id]
         elif link.published_state is not None:
             link.published_state = OfferState.REMOVED
             link.published_share = 0
@@ -271,5 +275,11 @@ def _reconcile(stream: Stream, remote: Iterable[KtStreamOffer], names: dict[int,
                     pinned=False,
                     published_state=OfferState.ACTIVE,
                     published_share=share,
+                    kt_state=remote_states[offer_id],
                 )
             )
+
+
+def _live(offers: Iterable[KtStreamOffer]) -> list[KtStreamOffer]:
+    """Offers Keitaro still has in the stream (deleted ones are history)."""
+    return [o for o in offers if o.state != "deleted"]

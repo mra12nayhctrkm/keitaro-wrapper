@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import IntegrityError
 
 from app.api.routes import router
 from app.config import Settings, get_settings
@@ -65,12 +66,22 @@ def create_app(
     @app.exception_handler(KeitaroError)
     async def keitaro_error(_: Request, exc: KeitaroError) -> JSONResponse:
         # 401/403 from Keitaro is our misconfiguration, not the user's: say so.
-        detail = (
-            "Keitaro rejected the API key: check KEITARO_API_KEY."
-            if exc.status_code in (401, 403)
-            else f"Keitaro: {exc.message}"
+        if exc.status_code in (401, 403):
+            return JSONResponse(
+                status_code=502,
+                content={"detail": "Keitaro rejected the API key: check KEITARO_API_KEY."},
+            )
+        # Keitaro refused the data (e.g. a name already taken): the user can fix it.
+        status = 422 if exc.status_code in (400, 422) else 502
+        return JSONResponse(status_code=status, content={"detail": f"Keitaro: {exc.message}"})
+
+    @app.exception_handler(IntegrityError)
+    async def integrity_error(_: Request, __: IntegrityError) -> JSONResponse:
+        # Two requests changed the same stream at once; the loser just retries.
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "The stream was changed by another request, try again."},
         )
-        return JSONResponse(status_code=502, content={"detail": detail})
 
     @app.exception_handler(KeitaroUnavailableError)
     async def keitaro_unavailable(_: Request, exc: KeitaroUnavailableError) -> JSONResponse:
@@ -84,6 +95,7 @@ def create_app(
 
 def _mount_frontend(app: FastAPI, dist: Path) -> None:
     """Serve the built SPA; unknown non-API paths fall back to index.html."""
+    dist = dist.resolve()
     app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
     index = dist / "index.html"
 

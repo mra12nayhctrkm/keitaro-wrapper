@@ -15,11 +15,14 @@ from sqlalchemy.pool import ConnectionPoolEntry
 def create_engine(url: str) -> AsyncEngine:
     engine = create_async_engine(url)
     if engine.dialect.name == "sqlite":
-        # SQLite ignores foreign keys (and ON DELETE CASCADE) unless asked.
+        # SQLite ignores foreign keys (and ON DELETE CASCADE) unless asked;
+        # WAL + busy_timeout let concurrent requests wait instead of failing.
         @event.listens_for(engine.sync_engine, "connect")
         def _enable_fk(dbapi_conn: DBAPIConnection, _record: ConnectionPoolEntry) -> None:
             cursor = dbapi_conn.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
             cursor.close()
 
     return engine

@@ -112,6 +112,9 @@ class StreamOffer(Base):
         )
     )
     published_share: Mapped[int | None] = mapped_column(Integer)
+    # Keitaro's own flag for the offer in this stream ("active" / "disabled").
+    # Preserved on push so we never silently re-enable a disabled offer.
+    kt_state: Mapped[str] = mapped_column(String(16), default="active", server_default="active")
 
     stream: Mapped[Stream] = relationship(back_populates="offers")
 

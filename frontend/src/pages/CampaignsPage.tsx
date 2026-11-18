@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router'
 import { api, type Meta, type Named } from '../api'
 import { OfferSearch } from '../components/OfferSearch'
 
@@ -121,22 +121,28 @@ function Select(props: { id: string; items: Named[]; value: number; onChange: (i
 
 function CampaignList() {
   const [q, setQ] = useState('')
-  const campaigns = useQuery({ queryKey: ['campaigns', q], queryFn: () => api.listCampaigns(q) })
+  // Load the list once and filter locally: no request to Keitaro per keystroke.
+  const campaigns = useQuery({ queryKey: ['campaigns'], queryFn: () => api.listCampaigns(''), staleTime: 60_000 })
+  const needle = q.trim().toLowerCase()
+  const shown = campaigns.data?.filter(
+    (c) => !needle || c.name.toLowerCase().includes(needle) || String(c.id) === needle,
+  )
 
   return (
     <section className="card">
       <h2>Edit a campaign</h2>
       <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by name or ID" aria-label="Filter campaigns" />
       {campaigns.error && <p className="error">{campaigns.error.message}</p>}
+      {campaigns.isPending && <p className="muted">Loading…</p>}
       <ul className="campaign-list">
-        {campaigns.data?.map((c) => (
+        {shown?.slice(0, 200).map((c) => (
           <li key={c.id}>
             <Link to={`/campaigns/${c.id}`}>
               <span className="muted">#{c.id}</span> {c.name}
             </Link>
           </li>
         ))}
-        {campaigns.data?.length === 0 && <li className="muted">No campaigns</li>}
+        {shown?.length === 0 && <li className="muted">No campaigns</li>}
       </ul>
     </section>
   )

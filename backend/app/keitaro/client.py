@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Protocol
 
 import httpx
@@ -88,6 +89,7 @@ _offers = TypeAdapter(list[KtOffer])
 _named = TypeAdapter(list[KtNamed])
 
 _RETRIES = 2  # extra attempts for idempotent requests on network errors / 5xx
+_BACKOFF = 0.3  # seconds; doubled on every retry
 
 
 class KeitaroClient:
@@ -98,7 +100,9 @@ class KeitaroClient:
         *,
         timeout: float = 20.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        backoff: float = _BACKOFF,
     ) -> None:
+        self._backoff = backoff
         self._http = httpx.AsyncClient(
             base_url=base_url,
             headers={"Api-Key": api_key, "Accept": "application/json"},
@@ -119,9 +123,11 @@ class KeitaroClient:
                 response = await self._http.request(method, path, json=json, params=params)
             except httpx.TransportError as exc:
                 if attempt < attempts:
+                    await asyncio.sleep(self._backoff * 2 ** (attempt - 1))
                     continue
                 raise KeitaroUnavailableError(f"Keitaro is unreachable: {exc}") from exc
             if response.status_code >= 500 and attempt < attempts:
+                await asyncio.sleep(self._backoff * 2 ** (attempt - 1))
                 continue
             if response.is_error:
                 raise KeitaroError(response.status_code, _error_message(response))
@@ -184,5 +190,14 @@ def _error_message(response: httpx.Response) -> str:
     if isinstance(body, dict):
         for key in ("error", "message", "errors"):
             if key in body:
-                return str(body[key])
-    return str(body)[:300]
+                return _flatten(body[key])
+    return _flatten(body)
+
+
+def _flatten(value: Any) -> str:
+    """`{'name': ['Name is taken']}` -> `name: Name is taken`."""
+    if isinstance(value, dict):
+        return "; ".join(f"{field}: {_flatten(msg)}" for field, msg in value.items())
+    if isinstance(value, list):
+        return ", ".join(_flatten(v) for v in value)
+    return str(value)[:300]

@@ -346,3 +346,25 @@ async def test_failed_push_keeps_the_draft(client: AsyncClient, keitaro: FakeKei
     stream = await offer_stream(client)
     assert stream["is_dirty"] is True
     assert view(stream)[14] == (25, "pending_add")
+
+
+async def test_push_keeps_offers_disabled_in_keitaro_disabled(
+    client: AsyncClient, keitaro: FakeKeitaro
+) -> None:
+    keitaro.streams[OFFER_STREAM]["offers"][1]["state"] = "disabled"  # offer 12
+    await fetch(client)
+    await call(client, "POST", f"/api/streams/{OFFER_STREAM}/offers", json={"offer_id": 14})
+    await call(client, "POST", f"/api/streams/{OFFER_STREAM}/push")
+    states = {o["offer_id"]: o["state"] for o in keitaro.streams[OFFER_STREAM]["offers"]}
+    assert states == {11: "active", 12: "disabled", 13: "active", 14: "active"}
+
+
+async def test_offers_deleted_in_keitaro_are_ignored(
+    client: AsyncClient, keitaro: FakeKeitaro
+) -> None:
+    keitaro.streams[OFFER_STREAM]["offers"][2]["state"] = "deleted"  # offer 13
+    stream = (await fetch(client))["streams"][1]
+    assert 13 not in view(stream)
+    await call(client, "POST", f"/api/streams/{OFFER_STREAM}/offers", json={"offer_id": 14})
+    # the deleted entry must not make push think the stream changed remotely
+    await call(client, "POST", f"/api/streams/{OFFER_STREAM}/push")
