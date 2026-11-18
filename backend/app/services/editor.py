@@ -10,23 +10,31 @@ A stream is "dirty" (yellow in the UI) while they differ for any offer.
 
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.keitaro.client import KeitaroApi, KeitaroError, KtStreamOffer
-from app.models import Campaign, OfferState, Stream, StreamOffer
+from app.models import Campaign, OfferState, PublishLog, Stream, StreamOffer
 from app.services.errors import ConflictError, NotFoundError, ValidationError
 from app.services.offers import OfferCatalog
 from app.services.weights import TOTAL, Slot, distribute
 
 
 class StreamEditor:
-    def __init__(self, session: AsyncSession, keitaro: KeitaroApi, catalog: OfferCatalog) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        keitaro: KeitaroApi,
+        catalog: OfferCatalog,
+        actor: str | None = None,
+    ) -> None:
         self._session = session
         self._keitaro = keitaro
         self._catalog = catalog
+        self._actor = actor  # who is editing, recorded in the publish history
 
     # ---- reading ---------------------------------------------------------
 
@@ -65,7 +73,7 @@ class StreamEditor:
         kt_streams = [
             s for s in await self._keitaro.list_streams(campaign_id) if s.state != "deleted"
         ]
-        names = await self._catalog.names() if any(s.offers for s in kt_streams) else {}
+        names = await self._catalog.names(refresh=True) if any(s.offers for s in kt_streams) else {}
 
         campaign = await self._session.scalar(
             select(Campaign)
@@ -198,6 +206,7 @@ class StreamEditor:
                 "Fetch streams again, then repeat your changes."
             )
 
+        before = _snapshot(stream)
         updated = await self._keitaro.update_stream(
             stream_id,
             {
@@ -207,6 +216,64 @@ class StreamEditor:
             },
         )
         _reconcile(stream, updated.offers, {})
+        self._session.add(
+            PublishLog(
+                stream_id=stream.id,
+                actor=self._actor,
+                before=before,
+                after=_snapshot(stream),
+            )
+        )
+        return await self._save(stream, rebalance=False)
+
+    # ---- history ---------------------------------------------------------
+
+    async def history(self, stream_id: int, limit: int = 50) -> list[PublishLog]:
+        await self.get_stream(stream_id)  # 404 for unknown streams
+        result = await self._session.scalars(
+            select(PublishLog)
+            .where(PublishLog.stream_id == stream_id)
+            .order_by(PublishLog.id.desc())
+            .limit(limit)
+        )
+        return list(result)
+
+    async def restore(self, stream_id: int, log_id: int, *, before: bool = False) -> Stream:
+        """
+        Load a past version as a draft (publish it with Push): the result of
+        that push, or with `before=True` the state it replaced ("undo").
+        """
+        stream = await self._editable_stream(stream_id)
+        entry = await self._session.get(PublishLog, log_id)
+        if entry is None or entry.stream_id != stream_id:
+            raise NotFoundError(f"History entry {log_id} not found for stream {stream_id}.")
+
+        wanted = {item["offer_id"]: item for item in (entry.before if before else entry.after)}
+        for link in list(stream.offers):
+            link.pinned = False  # the snapshot's shares are exact; old pins would fight them
+            if link.offer_id in wanted:
+                link.state = OfferState.ACTIVE
+                link.share = wanted[link.offer_id]["share"]
+            elif link.published_state is None:
+                stream.offers.remove(link)
+            else:
+                link.state = OfferState.REMOVED
+                link.share = 0
+        known = {o.offer_id for o in stream.offers}
+        for offer_id, item in wanted.items():
+            if offer_id not in known:
+                stream.offers.append(
+                    StreamOffer(
+                        offer_id=offer_id,
+                        offer_name=item.get("offer_name", ""),
+                        state=OfferState.ACTIVE,
+                        share=item["share"],
+                        pinned=False,
+                        published_state=None,
+                        published_share=None,
+                        kt_state=item.get("state", "active"),
+                    )
+                )
         return await self._save(stream, rebalance=False)
 
     # ---- helpers ---------------------------------------------------------
@@ -283,3 +350,17 @@ def _reconcile(stream: Stream, remote: Iterable[KtStreamOffer], names: dict[int,
 def _live(offers: Iterable[KtStreamOffer]) -> list[KtStreamOffer]:
     """Offers Keitaro still has in the stream (deleted ones are history)."""
     return [o for o in offers if o.state != "deleted"]
+
+
+def _snapshot(stream: Stream) -> list[dict[str, Any]]:
+    """The offers Keitaro has for this stream, as stored in the publish history."""
+    return [
+        {
+            "offer_id": o.offer_id,
+            "offer_name": o.offer_name,
+            "share": o.published_share or 0,
+            "state": o.kt_state,
+        }
+        for o in stream.offers
+        if o.published_state is OfferState.ACTIVE
+    ]

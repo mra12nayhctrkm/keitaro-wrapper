@@ -29,6 +29,10 @@ class Settings(BaseSettings):
 
     geo_redirect_url: str = "https://google.com"
 
+    # Optional HTTP Basic auth for the whole app. Off when the password is empty.
+    app_username: str = "admin"
+    app_password: SecretStr = SecretStr("")
+
     # How long the Keitaro offer list is cached for autocomplete, seconds.
     offers_cache_ttl: float = 60.0
 

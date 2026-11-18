@@ -137,4 +137,37 @@ describe('StreamCard', () => {
     renderCard({ ...stream, total_share: 90 })
     expect(screen.getByText(/Shares add up to 90%/)).toBeInTheDocument()
   })
+
+  it('shows publish history and restores a version as a draft', async () => {
+    const restored: Stream = { ...stream, is_dirty: true }
+    const fetchMock = mockFetch({
+      'GET /api/streams/2/history': [
+        {
+          id: 5, stream_id: 2, actor: 'boss', created_at: '2026-11-18T18:00:00+00:00',
+          before: [{ offer_id: 11, offer_name: 'Miaflow', share: 100, state: 'active' }],
+          after: [
+            { offer_id: 11, offer_name: 'Miaflow', share: 50, state: 'active' },
+            { offer_id: 12, offer_name: 'Oxys', share: 50, state: 'disabled' },
+          ],
+        },
+      ],
+      'POST /api/streams/2/history/5/restore': restored,
+    })
+    const { client } = renderCard()
+
+    await userEvent.click(screen.getByText('History'))
+    const panel = await screen.findByRole('list', { name: 'Publish history' })
+    expect(within(panel).getByText(/boss/)).toBeInTheDocument()
+    expect(within(panel).getByText('#11 50%, #12 50% (disabled)')).toBeInTheDocument()
+
+    await userEvent.click(within(panel).getByText('Restore'))
+    await waitFor(() =>
+      expect(client.getQueryData<Campaign>(['campaign', 1])?.streams[0].is_dirty).toBe(true),
+    )
+    expect(fetchMock.mock.calls.map((c) => String(c[0]))).toContain('/api/streams/2/history/5/restore?version=after')
+    await userEvent.click(within(panel).getByText('Undo'))
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.map((c) => String(c[0]))).toContain('/api/streams/2/history/5/restore?version=before'),
+    )
+  })
 })

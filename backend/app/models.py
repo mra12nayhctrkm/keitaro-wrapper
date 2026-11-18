@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -134,3 +135,17 @@ class StreamOffer(Base):
         if self.published_state is OfferState.ACTIVE:
             return OfferStatus.PENDING_REMOVE
         return OfferStatus.REMOVED
+
+
+class PublishLog(Base):
+    """One "Push to Keitaro": the stream's offers before and after, and who did it."""
+
+    __tablename__ = "publish_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    stream_id: Mapped[int] = mapped_column(ForeignKey("streams.id", ondelete="CASCADE"), index=True)
+    actor: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # [{"offer_id": 1, "offer_name": "...", "share": 50, "state": "active"}, ...]
+    before: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    after: Mapped[list[dict[str, Any]]] = mapped_column(JSON)

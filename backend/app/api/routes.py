@@ -1,3 +1,5 @@
+from typing import Literal
+
 from fastapi import APIRouter, Query, status
 
 from app.api.deps import CatalogDep, CreatorDep, EditorDep, KeitaroDep, SettingsDep
@@ -9,6 +11,7 @@ from app.schemas import (
     MetaOut,
     NamedOut,
     OfferOut,
+    PublishLogOut,
     StreamOut,
     UpdateOffer,
 )
@@ -92,6 +95,28 @@ async def add_offer(stream_id: int, body: AddOffer, editor: EditorDep) -> Stream
 @router.post("/streams/{stream_id}/push", summary="Publish the stream draft to Keitaro")
 async def push_stream(stream_id: int, editor: EditorDep) -> StreamOut:
     return StreamOut.model_validate(await editor.push(stream_id))
+
+
+@router.get("/streams/{stream_id}/history", summary="Publish history, newest first")
+async def stream_history(stream_id: int, editor: EditorDep) -> list[PublishLogOut]:
+    return [PublishLogOut.model_validate(e) for e in await editor.history(stream_id)]
+
+
+@router.post(
+    "/streams/{stream_id}/history/{log_id}/restore",
+    summary="Load a published version back as a draft",
+)
+async def restore_version(
+    stream_id: int,
+    log_id: int,
+    editor: EditorDep,
+    version: Literal["after", "before"] = Query(
+        default="after", description="'after' = that push's result, 'before' = undo it"
+    ),
+) -> StreamOut:
+    return StreamOut.model_validate(
+        await editor.restore(stream_id, log_id, before=version == "before")
+    )
 
 
 @router.post("/streams/{stream_id}/cancel", summary="Discard unpublished changes")

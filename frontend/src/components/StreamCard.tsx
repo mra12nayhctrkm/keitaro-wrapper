@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { api, type Campaign, type Named, type Stream, type StreamOffer } from '../api'
+import { HistoryPanel } from './HistoryPanel'
 import { OfferSearch } from './OfferSearch'
 
 const STATUS_LABEL: Record<StreamOffer['status'], string> = {
@@ -17,6 +18,7 @@ interface Props {
 export function StreamCard({ stream }: Props) {
   const queryClient = useQueryClient()
   const [offer, setOffer] = useState<Named | null>(null)
+  const [showHistory, setShowHistory] = useState(false)
 
   // Every edit returns the updated stream; put it straight into the campaign cache.
   const mutation = useMutation({
@@ -28,6 +30,8 @@ export function StreamCard({ stream }: Props) {
           streams: campaign.streams.map((s) => (s.id === updated.id ? updated : s)),
         },
       )
+      // A push adds a history entry.
+      void queryClient.invalidateQueries({ queryKey: ['history', updated.id] })
     },
   })
   const run = (action: () => Promise<Stream>) => mutation.mutate(action)
@@ -56,17 +60,24 @@ export function StreamCard({ stream }: Props) {
           {stream.name} <span className="muted">#{stream.id}</span>
           {stream.is_dirty && <span className="badge warn">unpublished</span>}
         </h3>
-        {stream.is_dirty && (
-          <div className="actions">
-            <button className="primary" disabled={busy} onClick={() => run(() => api.push(stream.id))}>
-              Push to Keitaro
-            </button>
-            <button disabled={busy} onClick={() => run(() => api.cancel(stream.id))}>
-              Cancel
-            </button>
-          </div>
-        )}
+        <div className="actions">
+          {stream.is_dirty && (
+            <>
+              <button className="primary" disabled={busy} onClick={() => run(() => api.push(stream.id))}>
+                Push to Keitaro
+              </button>
+              <button disabled={busy} onClick={() => run(() => api.cancel(stream.id))}>
+                Cancel
+              </button>
+            </>
+          )}
+          <button aria-expanded={showHistory} onClick={() => setShowHistory((v) => !v)}>
+            History
+          </button>
+        </div>
       </header>
+
+      {showHistory && <HistoryPanel streamId={stream.id} busy={busy} run={run} />}
 
       {mutation.error && (
         <p className="error" role="alert">

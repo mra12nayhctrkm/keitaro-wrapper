@@ -1,10 +1,13 @@
+import base64
+import binascii
+import hmac
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import IntegrityError
 
@@ -53,7 +56,12 @@ def create_app(
             await engine.dispose()
 
     app = FastAPI(title="Keitaro Wrapper", version="1.0.0", lifespan=lifespan)
+    app.state.settings = settings
     app.include_router(router)
+
+    password = settings.app_password.get_secret_value()
+    if password:
+        _add_basic_auth(app, settings.app_username, password)
 
     @app.get("/api/health", include_in_schema=False)
     async def health() -> dict[str, str]:
@@ -91,6 +99,31 @@ def create_app(
         _mount_frontend(app, frontend_dist)
 
     return app
+
+
+def _add_basic_auth(app: FastAPI, username: str, password: str) -> None:
+    """Protect everything except the health check with HTTP Basic auth."""
+    expected = f"{username}:{password}".encode()
+
+    @app.middleware("http")
+    async def basic_auth(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        if request.url.path == "/api/health":
+            return await call_next(request)
+        scheme, _, encoded = request.headers.get("Authorization", "").partition(" ")
+        try:
+            given = base64.b64decode(encoded, validate=True) if scheme.lower() == "basic" else b""
+        except binascii.Error:
+            given = b""
+        # Constant-time comparison: no timing hints about the password.
+        if not hmac.compare_digest(given, expected):
+            return Response(
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="Keitaro Wrapper", charset="UTF-8"'},
+            )
+        request.state.user = username
+        return await call_next(request)
 
 
 def _mount_frontend(app: FastAPI, dist: Path) -> None:

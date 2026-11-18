@@ -35,6 +35,22 @@ export interface Campaign {
   streams: Stream[]
 }
 
+export interface SnapshotOffer {
+  offer_id: number
+  offer_name: string
+  share: number
+  state: string
+}
+
+export interface PublishLog {
+  id: number
+  stream_id: number
+  actor: string | null
+  created_at: string
+  before: SnapshotOffer[]
+  after: SnapshotOffer[]
+}
+
 export interface KeitaroCampaign {
   id: number
   name: string
@@ -115,6 +131,9 @@ export const api = {
   addOffer: (streamId: number, offerId: number) =>
     request<Stream>('POST', `/api/streams/${streamId}/offers`, { offer_id: offerId }),
   push: (streamId: number) => request<Stream>('POST', `/api/streams/${streamId}/push`),
+  history: (streamId: number) => request<PublishLog[]>('GET', `/api/streams/${streamId}/history`),
+  restore: (streamId: number, logId: number, version: 'after' | 'before' = 'after') =>
+    request<Stream>('POST', `/api/streams/${streamId}/history/${logId}/restore?version=${version}`),
   cancel: (streamId: number) => request<Stream>('POST', `/api/streams/${streamId}/cancel`),
   removeOffer: (linkId: number) => request<Stream>('POST', `/api/stream-offers/${linkId}/remove`),
   bringBack: (linkId: number) =>

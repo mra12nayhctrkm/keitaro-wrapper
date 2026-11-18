@@ -19,10 +19,10 @@ class OfferCatalog:
         self._loaded_at: float | None = None
         self._lock = asyncio.Lock()
 
-    async def all(self) -> list[KtOffer]:
+    async def all(self, *, refresh: bool = False) -> list[KtOffer]:
         async with self._lock:
             now = self._clock()
-            if self._loaded_at is None or now - self._loaded_at >= self._ttl:
+            if refresh or self._loaded_at is None or now - self._loaded_at >= self._ttl:
                 offers = await self._keitaro.list_offers()
                 self._offers = [o for o in offers if o.state != "deleted"]
                 self._loaded_at = now
@@ -45,8 +45,8 @@ class OfferCatalog:
         matches = [o for o in offers if str(o.id).startswith(q) or q in o.name.lower()]
         return sorted(matches, key=rank)[:limit]
 
-    async def names(self) -> dict[int, str]:
-        return {o.id: o.name for o in await self.all()}
+    async def names(self, *, refresh: bool = False) -> dict[int, str]:
+        return {o.id: o.name for o in await self.all(refresh=refresh)}
 
     async def get(self, offer_id: int) -> KtOffer:
         for offer in await self.all():

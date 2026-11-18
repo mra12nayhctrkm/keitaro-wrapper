@@ -1,8 +1,17 @@
 from datetime import UTC, datetime
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
 
 from app.models import OfferStatus
+
+
+def _utc_iso(value: datetime) -> str:
+    # SQLite drops the timezone; values are stored in UTC, so say so.
+    return (value if value.tzinfo else value.replace(tzinfo=UTC)).isoformat()
+
+
+UtcDatetime = Annotated[datetime, PlainSerializer(_utc_iso, return_type=str)]
 
 
 class _Out(BaseModel):
@@ -72,15 +81,24 @@ class CampaignOut(_Out):
     id: int
     name: str
     alias: str | None
-    fetched_at: datetime | None
+    fetched_at: UtcDatetime | None
     streams: list[StreamOut]
 
-    @field_serializer("fetched_at")
-    def _utc(self, value: datetime | None) -> str | None:
-        # SQLite drops the timezone; values are stored in UTC, so say so.
-        if value is None:
-            return None
-        return (value if value.tzinfo else value.replace(tzinfo=UTC)).isoformat()
+
+class SnapshotOffer(BaseModel):
+    offer_id: int
+    offer_name: str = ""
+    share: int
+    state: str = "active"
+
+
+class PublishLogOut(_Out):
+    id: int
+    stream_id: int
+    actor: str | None
+    created_at: UtcDatetime
+    before: list[SnapshotOffer]
+    after: list[SnapshotOffer]
 
 
 class AddOffer(BaseModel):

@@ -34,7 +34,7 @@ cp .env.example .env        # впишите KEITARO_API_KEY
 docker compose up --build
 ```
 
-Миграции применяются при старте контейнера, база лежит в volume `data`.
+Поднимаются два контейнера: приложение и **PostgreSQL 17**. Миграции применяются при старте приложения, данные лежат в томе `pgdata`.
 
 ### Режим разработки
 
@@ -67,7 +67,7 @@ uv run alembic revision --autogenerate -m "описание"   # новая ми
 uv run alembic check                                   # модели и миграции совпадают?
 ```
 
-Для PostgreSQL установите драйвер (`uv add asyncpg`) и задайте `DATABASE_URL=postgresql+asyncpg://user:pass@host/db`.
+PostgreSQL поддерживается из коробки (драйвер `asyncpg` уже в зависимостях): задайте `DATABASE_URL=postgresql+asyncpg://user:pass@host/db`. `docker compose` делает это сам.
 
 Тесты собирают схему через `alembic upgrade head`, как в продакшене, и проверяют, что модели не разошлись с миграциями.
 
@@ -119,6 +119,19 @@ uv run alembic check                                   # модели и миг�
 
 ---
 
+### Журнал публикаций
+
+Каждый Push записывается в журнал: кто опубликовал, когда, и какие офферы с какими долями были в Keitaro до и после. В карточке потока кнопка **History** показывает журнал, у каждой записи две кнопки:
+
+- **Restore** загружает результат той публикации как черновик;
+- **Undo** загружает состояние до неё.
+
+И то, и другое публикуется обычным Push, так что прошлую версию можно сначала посмотреть.
+
+### Доступ
+
+Если в `.env` задан `APP_PASSWORD`, вся обёртка, кроме `/api/health`, закрывается HTTP Basic авторизацией: браузер сам спросит логин и пароль. Имя пользователя (`APP_USERNAME`) записывается в журнал публикаций. Пароль сравнивается за постоянное время, чтобы по времени ответа нельзя было подбирать его.
+
 ## API
 
 | Метод | Путь | Назначение |
@@ -135,6 +148,8 @@ uv run alembic check                                   # модели и миг�
 | POST | `/api/stream-offers/{id}/remove` | удалить оффер |
 | POST | `/api/stream-offers/{id}/bring-back` | вернуть оффер |
 | PATCH | `/api/stream-offers/{id}` | `{"pinned": true}` или `{"share": 40}` (задать и закрепить) |
+| GET | `/api/streams/{id}/history` | журнал публикаций, новые сверху |
+| POST | `/api/streams/{id}/history/{log}/restore?version=after\|before` | вернуть версию (или отменить публикацию) как черновик |
 
 Ошибки Keitaro превращаются в понятные ответы:
 - 422, если Keitaro отклонил данные, например `Keitaro: name: Name has already used`;
@@ -152,9 +167,16 @@ make test     # backend (pytest) + frontend (vitest)
 make check    # + ruff, mypy --strict, oxlint, tsc — то же, что в CI
 ```
 
-- **Backend: 90 тестов, покрытие 99%.** Keitaro подменяется фейком в памяти (`tests/fake_keitaro.py`), сценарий из видео пройден по шагам через HTTP API (`tests/test_editor.py`). HTTP-клиент проверяется отдельно через respx: заголовки, ошибки, повторы. Распределение весов дополнительно проверяется property-based тестами на Hypothesis: сумма всегда 100, закреплённые доли не меняются, разница между незакреплёнными не больше 1.
-- **Frontend: 12 тестов на Vitest + Testing Library.** Кнопки шлют правильные запросы, ответ сразу попадает в кэш, ошибки показываются пользователю.
-- **CI** (GitHub Actions): линтеры, типы, миграции, тесты, сборка фронта и Docker-образа.
+- **Backend: 102 теста, покрытие 98%.** Каждый тест поднимает схему через `alembic upgrade head` и откатывает через `downgrade base`, так что обе стороны миграций проверяются постоянно. Keitaro подменяется фейком в памяти (`tests/fake_keitaro.py`), сценарий из видео пройден по шагам через HTTP API (`tests/test_editor.py`). HTTP-клиент проверяется отдельно через respx: заголовки, ошибки, повторы. Распределение весов дополнительно проверяется property-based тестами на Hypothesis: сумма всегда 100, закреплённые доли не меняются, разница между незакреплёнными не больше 1.
+- **Frontend: 13 тестов на Vitest + Testing Library.** Кнопки шлют правильные запросы, ответ сразу попадает в кэш, ошибки показываются пользователю.
+- **CI** (GitHub Actions): линтеры, типы, миграции, тесты бэкенда **на SQLite и на PostgreSQL**, тесты и сборка фронта, сборка Docker-образа.
+
+Локально на PostgreSQL:
+
+```bash
+docker run -d --name kw-pg -e POSTGRES_PASSWORD=test -p 55432:5432 postgres:17-alpine
+cd backend && TEST_DATABASE_URL=postgresql+asyncpg://postgres:test@localhost:55432/postgres uv run pytest
+```
 
 ### Проверка на настоящем Keitaro
 
@@ -198,3 +220,4 @@ frontend/src/
 | `CAMPAIGN_PREFIX` | `test_mkrtchyan_` | префикс названий кампаний |
 | `DEFAULT_DOMAIN` / `DEFAULT_GROUP` / `DEFAULT_TRAFFIC_SOURCE` | `in.posdk.xyz` / `FORTESTS` / `FORTESTS` | что подставлять в форму |
 | `GEO_REDIRECT_URL` | `https://google.com` | куда ведёт гео-поток |
+| `APP_USERNAME` / `APP_PASSWORD` | `admin` / пусто | вход в обёртку (HTTP Basic); пустой пароль отключает вход |

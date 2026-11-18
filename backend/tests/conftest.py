@@ -1,4 +1,5 @@
-from collections.abc import AsyncIterator
+import os
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
@@ -18,20 +19,27 @@ BACKEND = Path(__file__).resolve().parents[1]
 def settings(tmp_path: Path) -> Settings:
     return Settings(
         _env_file=None,  # never read the developer's .env
-        database_url=f"sqlite+aiosqlite:///{tmp_path / 'test.db'}",
+        # CI also runs the suite on PostgreSQL by setting TEST_DATABASE_URL.
+        database_url=os.environ.get("TEST_DATABASE_URL")
+        or f"sqlite+aiosqlite:///{tmp_path / 'test.db'}",
         keitaro_api_key="test-key",
         campaign_prefix="test_mkrtchyan_",
     )
 
 
 @pytest.fixture
-def migrated_db(settings: Settings) -> None:
-    """Build the schema through Alembic, the same way it is built in production."""
+def migrated_db(settings: Settings) -> Iterator[None]:
+    """
+    Build the schema through Alembic, the same way it is built in production,
+    and tear it down with the downgrades (so they are exercised on every test).
+    """
     config = Config(BACKEND / "alembic.ini")
     config.set_main_option("script_location", str(BACKEND / "migrations"))
     config.set_main_option("sqlalchemy.url", settings.database_url)
     config.attributes["configure_logger"] = False
     command.upgrade(config, "head")
+    yield
+    command.downgrade(config, "base")
 
 
 @pytest.fixture

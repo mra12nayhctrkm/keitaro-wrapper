@@ -1,14 +1,30 @@
 services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: keitaro
+      POSTGRES_PASSWORD: keitaro
+      POSTGRES_DB: keitaro
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keitaro -d keitaro"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
   app:
     build: .
     env_file: .env
     environment:
-      DATABASE_URL: sqlite+aiosqlite:////data/keitaro_wrapper.db
+      DATABASE_URL: postgresql+asyncpg://keitaro:keitaro@db:5432/keitaro
     ports:
       - "8000:8000"
-    volumes:
-      - data:/data
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
-  data:
+  pgdata:
